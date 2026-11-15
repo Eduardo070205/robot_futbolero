@@ -16,7 +16,7 @@ const int pwmResolution = 8;  // 0-255 (8 bits)
 
 // ===== SEGURIDAD (WATCHDOG) =====
 unsigned long lastRecvTime = 0;
-const unsigned long TIMEOUT_MS = 250;   // 250 ms sin datos → parar motores
+const unsigned long TIMEOUT_MS = 250;   // medio segundo sin datos → parar
 bool isMoving = false;
 
 // ===== FUNCIÓN DE CONTROL DE MOTORES =====
@@ -99,7 +99,7 @@ void setup() {
 
   // Inicializar WiFi en modo estación y fijar el mismo canal que el maestro
   WiFi.mode(WIFI_STA);
-  WiFi.setChannel(2);   // Importante: debe coincidir con el maestro
+  WiFi.setChannel(1);   // Importante: debe coincidir con el maestro
 
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(OnDataRecv);

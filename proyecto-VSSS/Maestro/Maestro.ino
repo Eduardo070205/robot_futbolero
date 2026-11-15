@@ -4,15 +4,13 @@
 // ==========================================
 // DIRECCIONES MAC DE LOS 3 ROBOTS (ESCLAVOS)
 // ==========================================
-uint8_t mac_DEL[] = {0x70, 0x4b, 0xca, 0x83, 0x48, 0xa0};   // 70:4B:CA:83:48:A0
-uint8_t mac_POR[] = {0x70, 0x4b, 0xca, 0x83, 0x4f, 0xa4};   // 70:4B:CA:83:4F:A4
-uint8_t mac_MED[] = {0x30, 0x76, 0xf5, 0xa7, 0x68, 0xb4};   // 30:76:F5:A7:68:B4
+uint8_t mac_DEL[] = {0x94, 0xB9, 0x7E, 0xF3, 0x00, 0x8C};   // 94:B9:7E:F3:00:8C
+uint8_t mac_POR[] = {0x84, 0x0D, 0x8E, 0x1B, 0x67, 0xA0};   // 84:0D:8E:1B:67:A0
+uint8_t mac_MED[] = {0x5C, 0x01, 0x3B, 0x67, 0x65, 0x2C};
 
 esp_now_peer_info_t peerInfo;
-
-// Buffer de lectura serial (evita String char-a-char)
-static char rxBuf[64];
-static uint8_t rxIdx = 0;
+String inputString = "";
+bool stringComplete = false;
 
 // Contadores para depuración
 unsigned long lastPrintTime = 0;
@@ -31,7 +29,7 @@ void OnDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 // Función para registrar esclavo
 void registrarEsclavo(uint8_t *mac) {
   memcpy(peerInfo.peer_addr, mac, 6);
-  peerInfo.channel = 0;
+  peerInfo.channel = 0;          // Usará el canal configurado en WiFi
   peerInfo.encrypt = false;
   peerInfo.ifidx = WIFI_IF_STA;
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
@@ -47,9 +45,9 @@ void registrarEsclavo(uint8_t *mac) {
 }
 
 void setup() {
-  Serial.begin(921600);
+  Serial.begin(115200);
   WiFi.mode(WIFI_STA);
-  WiFi.setChannel(2);
+  WiFi.setChannel(1);   // Fijar canal (debe ser el mismo en los esclavos)
 
   if (esp_now_init() != ESP_OK) {
     Serial.println("ERR:INIT_ESPNOW");
@@ -60,8 +58,6 @@ void setup() {
   registrarEsclavo(mac_MED);
   registrarEsclavo(mac_DEL);
 
-  esp_now_register_send_cb(OnDataSent);
-
   Serial.println("Maestro listo. Esperando PWMs desde Python...");
   Serial.println("Formato esperado: <pwmL,pwmR|pwmL,pwmR|pwmL,pwmR>");
 }
@@ -71,44 +67,61 @@ void loop() {
   while (Serial.available()) {
     char inChar = (char)Serial.read();
     if (inChar == '\n') {
-      rxBuf[rxIdx] = '\0';
-      rxIdx = 0;
-
-      // --- PROCESAR TRAMA ---
-      char* buf = rxBuf;
-      int len = strlen(buf);
-      // Trim espacios/\r
-      while (len > 0 && (buf[len-1] == '\r' || buf[len-1] == ' ')) buf[--len] = '\0';
-
-      if (len > 2 && buf[0] == '<' && buf[len-1] == '>') {
-        buf[len-1] = '\0';
-        char* datos = buf + 1;
-
-        char* split1 = strchr(datos, '|');
-        char* split2 = split1 ? strchr(split1 + 1, '|') : nullptr;
-
-        if (split1 && split2) {
-          *split1 = '\0';
-          *split2 = '\0';
-          char* partes[3] = {datos, split1 + 1, split2 + 1};
-          uint8_t* macs[3] = {mac_POR, mac_MED, mac_DEL};
-
-          for (int i = 0; i < 3; i++) {
-            if (strlen(partes[i]) > 0) {
-              esp_now_send(macs[i], (uint8_t*)partes[i], strlen(partes[i]) + 1);
-            }
-          }
-        }
-      }
-
-      // Estadísticas cada 5 segundos
-      if (millis() - lastPrintTime > 5000) {
-        Serial.printf("Paquetes OK: %d | Fallos: %d\n", packetsSent, packetsFailed);
-        lastPrintTime = millis();
-      }
-
-    } else if (rxIdx < sizeof(rxBuf) - 1) {
-      rxBuf[rxIdx++] = inChar;
+      stringComplete = true;
+      break;
+    } else {
+      inputString += inChar;
     }
   }
-}
+
+  // --- PROCESAR TRAMA ---
+  if (stringComplete) {
+    inputString.trim();
+    // Depuración: mostrar trama recibida
+    Serial.print("Trama recibida: ");
+    Serial.println(inputString);
+
+    if (inputString.startsWith("<") && inputString.endsWith(">")) {
+      String datos = inputString.substring(1, inputString.length() - 1);
+      int split1 = datos.indexOf('|');
+      int split2 = datos.indexOf('|', split1 + 1);
+
+      if (split1 > 0 && split2 > split1) {
+        String datos_POR = datos.substring(0, split1);
+        String datos_MED = datos.substring(split1 + 1, split2);
+        String datos_DEL = datos.substring(split2 + 1);
+
+        uint8_t* macs[3] = {mac_POR, mac_MED, mac_DEL};
+        String datos[3] = {datos_POR, datos_MED, datos_DEL};
+        const char* nombres[3] = {"POR", "MED", "DEL"};
+
+        for (int i = 0; i < 3; i++) {
+          datos[i].trim();
+          if (datos[i].length() > 0) {
+            esp_err_t result = esp_now_send(macs[i], (uint8_t*)datos[i].c_str(), datos[i].length() + 1);
+            if (result == ESP_OK) {
+              Serial.printf("Enviado a %s: %s\n", nombres[i], datos[i].c_str());
+            } else {
+              Serial.printf("Fallo en envío a %s (código: %d)\n", nombres[i], result);
+            }
+          } else {
+            Serial.printf("Datos vacíos para %s\n", nombres[i]);
+          }
+        }
+
+        // Mostrar estadísticas cada 5 segundos (solo si tienes el callback activo)
+        if (millis() - lastPrintTime > 5000) {
+          Serial.printf("Paquetes OK: %d | Fallos: %d\n", packetsSent, packetsFailed);
+          lastPrintTime = millis();
+        }
+      } else {
+        Serial.println("Formato inválido (faltan '|')");
+      }
+    } else {
+      Serial.println("Trama no tiene formato <...>");
+    }
+
+    inputString = "";
+    stringComplete = false;
+  }
+} 
