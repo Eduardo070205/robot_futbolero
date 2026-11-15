@@ -35,55 +35,63 @@ from tkinter import ttk, messagebox
 from urllib.parse import urlsplit
 
 
-def open_video_source(index=0, source='local', url=''):
-    """Abre una webcam física/virtual o una URL de video del teléfono."""
-    if source == 'iphone':
-        url = url.strip()
-        parts = urlsplit(url)
-        if parts.scheme.lower() not in ('http', 'https', 'rtsp', 'rtsps') or not parts.hostname:
-            raise ValueError('Introduce una URL de video HTTP(S) o RTSP válida. '
-                             'Para DroidCam por USB selecciona Local / iPhone USB.')
-        # Los timeouts se establecen al abrir: set() posterior no los aplica.
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, [
-            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
-            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000,
-        ])
-        if not cap.isOpened():
-            cap.release()
-            raise RuntimeError('No se pudo abrir el video del iPhone. Comprueba la URL '
-                               'de transmisión, la app del teléfono y la red.')
-    else:
-        if sys.platform == 'win32':
-            backends = (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY)
-        elif sys.platform == 'darwin':
-            backends = (cv2.CAP_AVFOUNDATION, cv2.CAP_ANY)
+class VideoSource:
+    """Apertura de fuentes de video locales y de red."""
+
+    @staticmethod
+    def open_video_source(index=0, source='local', url=''):
+        """Abre una webcam física/virtual o una URL de video del teléfono."""
+        if source == 'iphone':
+            url = url.strip()
+            parts = urlsplit(url)
+            if parts.scheme.lower() not in ('http', 'https', 'rtsp', 'rtsps') or not parts.hostname:
+                raise ValueError('Introduce una URL de video HTTP(S) o RTSP válida. '
+                                 'Para DroidCam por USB selecciona Local / iPhone USB.')
+            # Los timeouts se establecen al abrir: set() posterior no los aplica.
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000,
+            ])
+            if not cap.isOpened():
+                cap.release()
+                raise RuntimeError('No se pudo abrir el video del iPhone. Comprueba la URL '
+                                   'de transmisión, la app del teléfono y la red.')
         else:
-            backends = (cv2.CAP_ANY,)
-        cap = None
-        for backend in backends:
-            candidate = None
-            try:
-                candidate = cv2.VideoCapture(int(index), backend)
-                if candidate.isOpened():
-                    candidate.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                    candidate.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                    candidate.set(cv2.CAP_PROP_FPS, 30)
-                    ok, first = candidate.read()
-                    if ok and first is not None:
-                        cap = candidate
-                        break
-            except cv2.error:
-                # Algunos drivers lanzan error en vez de devolver False.
-                pass
-            finally:
-                if candidate is not None and candidate is not cap:
-                    candidate.release()
-        if cap is None:
-            raise RuntimeError(f'No se pudo leer la cámara {index}. Prueba otro índice, '
-                               'abre DroidCam y habilita el acceso a la cámara para '
-                               'aplicaciones de escritorio en Windows.')
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    return cap
+            if sys.platform == 'win32':
+                backends = (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY)
+            elif sys.platform == 'darwin':
+                backends = (cv2.CAP_AVFOUNDATION, cv2.CAP_ANY)
+            else:
+                backends = (cv2.CAP_ANY,)
+            cap = None
+            for backend in backends:
+                candidate = None
+                try:
+                    candidate = cv2.VideoCapture(int(index), backend)
+                    if candidate.isOpened():
+                        candidate.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                        candidate.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                        candidate.set(cv2.CAP_PROP_FPS, 30)
+                        ok, first = candidate.read()
+                        if ok and first is not None:
+                            cap = candidate
+                            break
+                except cv2.error:
+                    # Algunos drivers lanzan error en vez de devolver False.
+                    pass
+                finally:
+                    if candidate is not None and candidate is not cap:
+                        candidate.release()
+            if cap is None:
+                raise RuntimeError(f'No se pudo leer la cámara {index}. Prueba otro índice, '
+                                   'abre DroidCam y habilita el acceso a la cámara para '
+                                   'aplicaciones de escritorio en Windows.')
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
+
+
+# Alias públicos para conservar compatibilidad con el código existente.
+open_video_source = VideoSource.open_video_source
 
 # ============================================================
 # NOMBRES DE LOS ROBOTS
@@ -147,18 +155,317 @@ ROBOT_STATE = {robot_DEL: 'ATAQUE'}
 #
 # Uniforme AZUL (base = azul):
 #   DEL → verde + rosa   |  POR → amarillo + rojo
-def get_role_color_pairs(my_color):
-    """Retorna el dict de pares de marcadores → rol para el uniforme activo."""
-    if my_color == 'amarillo':
-        return {
-            ('rosa',     'verde'): robot_DEL,
-            ('azul',     'rosa'):  robot_POR,
+class TeamVision:
+    """Detección de pelota, bases y marcadores de los equipos."""
+
+    @staticmethod
+    def get_role_color_pairs(my_color):
+        """Retorna el dict de pares de marcadores → rol para el uniforme activo."""
+        if my_color == 'amarillo':
+            return {
+                ('rosa',     'verde'): robot_DEL,
+                ('azul',     'rosa'):  robot_POR,
+            }
+        else:   # azul
+            return {
+                ('rosa',     'verde'): robot_DEL,
+                ('amarillo', 'rojo'):  robot_POR,
+            }
+
+
+    @staticmethod
+    def lab_polar_mask(bgr, l_min, l_max, r_min, r_max, t_min, t_max, _precomp=None):
+        """Máscara binaria en espacio Lab polar (L, Chroma, Ángulo)."""
+        if _precomp is not None:
+            l_ch, mag, angle = _precomp
+        else:
+            lab  = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+            l_ch = lab[:, :, 0]
+            a    = lab[:, :, 1].astype(np.float32) - 128.0
+            b    = lab[:, :, 2].astype(np.float32) - 128.0
+            mag, angle = cv2.cartToPolar(a, b, angleInDegrees=True)
+        mask_l = cv2.inRange(l_ch, int(l_min), int(l_max))
+        mask_r = cv2.inRange(mag, float(r_min), float(r_max))
+        if t_min <= t_max:
+            mask_t = cv2.inRange(angle, float(t_min), float(t_max))
+        else:
+            mask_t = cv2.bitwise_or(
+                cv2.inRange(angle, float(t_min), 360.0),
+                cv2.inRange(angle, 0.0, float(t_max))
+            )
+        return cv2.bitwise_and(mask_l, cv2.bitwise_and(mask_r, mask_t))
+
+
+    @staticmethod
+    def detect_ball(bgr, lab_range, _precomp=None, last_pos=None):
+        """
+        Detecta la pelota con Lab polar + filtros de circularidad y fill ratio.
+
+        last_pos : última posición DETECTADA (no predicción Kalman).
+                   Se usa como desempate suave entre candidatos igualmente válidos.
+                   No debe usarse la predicción Kalman aquí para evitar bucles de
+                   realimentación que desplazan la detección hacia posiciones erróneas.
+        """
+        mask = lab_polar_mask(bgr, **lab_range, _precomp=_precomp)
+
+        h, w = mask.shape[:2]
+        border = 20
+        mask[:border, :]   = 0
+        mask[h-border:, :] = 0
+        mask[:, :border]   = 0
+        mask[:, w-border:] = 0
+
+        # Solo MORPH_OPEN: elimina ruido puntual sin crear blobs falsos.
+        # SIN GaussianBlur (desplaza centroides en máscaras binarias).
+        # SIN MORPH_CLOSE (une manchas distantes y genera pelotas fantasma).
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_KERNEL_3x3)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best = None
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < 40 or area > 1200:
+                continue
+            (x, y), radius = cv2.minEnclosingCircle(c)
+            if radius < 4 or radius > 22:
+                continue
+            perim = cv2.arcLength(c, True)
+            if perim <= 0:
+                continue
+            circularity = 4 * np.pi * area / (perim * perim)
+            fill_ratio  = area / (np.pi * radius * radius)
+            if circularity < 0.45 or fill_ratio < 0.35:
+                continue
+            # Centroide por momentos: más preciso que minEnclosingCircle
+            M = cv2.moments(c)
+            if M["m00"] > 0:
+                x = M["m10"] / M["m00"]
+                y = M["m01"] / M["m00"]
+            score = area * circularity * fill_ratio
+            # Bonus pequeño por cercanía a la última posición detectada real.
+            # Máximo +40 para desempatar sin contaminar la elección principal.
+            if last_pos is not None:
+                dist   = np.hypot(x - last_pos[0], y - last_pos[1])
+                score += max(0.0, 40.0 - dist)
+            if best is None or score > best[0]:
+                best = (score, int(x), int(y))
+        return (best[1], best[2]) if best else None
+
+
+    @staticmethod
+    def get_rects(bgr, lab_range, min_a=15, max_a=5000, _precomp=None):
+        mask = lab_polar_mask(bgr, **lab_range, _precomp=_precomp)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_KERNEL_3x3)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return [cv2.minAreaRect(c) for c in contours if min_a < cv2.contourArea(c) < max_a]
+
+
+    @staticmethod
+    def get_closest_marker_center(base_center, markers, radius):
+        closest, min_dist = None, radius
+        for m in markers:
+            (mx, my), _, _ = m
+            d = np.hypot(mx - base_center[0], my - base_center[1])
+            if d < min_dist:
+                min_dist = d
+                closest  = np.array([mx, my])
+        return closest
+
+
+    @staticmethod
+    def filter_bases_by_area(bases, min_area=250, min_side=12):
+        """Evita que marcadores chicos se tomen como bases de robot."""
+        filtered = []
+        for base in bases:
+            (_, _), (w, h), _ = base
+            if w * h >= min_area and min(w, h) >= min_side:
+                filtered.append(base)
+        return filtered
+
+
+    @staticmethod
+    def filter_rival_bases_near_own(rival_bases, own, min_dist=55):
+        """Descarta falsos rivales provocados por marcadores dentro de robots propios."""
+        own_positions = [r['pos'] for r in own.values() if r is not None]
+        filtered = []
+        for base in rival_bases:
+            (bx, by), _, _ = base
+            if not any(np.hypot(bx - ox, by - oy) < min_dist for ox, oy in own_positions):
+                filtered.append(base)
+        return filtered
+
+
+    @staticmethod
+    def filter_out_base_markers(bases, markers_dict, min_dist=10):
+        """
+        Elimina marcadores cuyo centro esté a menos de min_dist del centro de alguna base
+        Y cuya área sea >= 40% del área de esa base (los stickers pequeños sobreviven).
+        """
+        filtered = {}
+        for color_name, marker_list in markers_dict.items():
+            filtered[color_name] = []
+            for m in marker_list:
+                (mx, my), (mw, mh), _ = m
+                keep = True
+                for base in bases:
+                    (bx, by), (bw, bh), _ = base
+                    if np.hypot(mx - bx, my - by) < min_dist:
+                        if (mw * mh) >= (bw * bh) * 0.40:
+                            keep = False
+                            break
+                if keep:
+                    filtered[color_name].append(m)
+        return filtered
+
+
+    @staticmethod
+    def choose_role_markers(closest_of_color, role_pairs=None):
+        """
+        Elige el par válido de marcadores más cercano a la base.
+        Evita que un tercer color cercano rompa la identificación del rol.
+        closest_of_color: {color: (idx, pos, dist)}
+        role_pairs: dict par→rol (por defecto usa ROLE_COLOR_PAIRS global)
+        """
+        if role_pairs is None:
+            role_pairs = ROLE_COLOR_PAIRS
+        best = None
+        for pair, role in role_pairs.items():
+            if pair[0] not in closest_of_color or pair[1] not in closest_of_color:
+                continue
+            dist_sum = closest_of_color[pair[0]][2] + closest_of_color[pair[1]][2]
+            if best is None or dist_sum < best[0]:
+                best = (dist_sum, pair, role)
+        if best is None:
+            return None, None
+        return best[1], best[2]
+
+
+    @staticmethod
+    def identify_team(bgr, colors, my_color, _precomp=None):
+        """
+        Identifica los dos roles propios POR/DEL y los robots rivales.
+        Usa espacio Lab polar. Integra filtros de GApp para mayor robustez.
+        """
+        if my_color == 'azul':
+            my_base_range    = colors['azul']
+            rival_base_range = colors['amarillo']
+        else:
+            my_base_range    = colors['amarillo']
+            rival_base_range = colors['azul']
+
+        # Detectar bases: rivales con min_a mayor para evitar confusión con stickers
+        my_bases_raw    = get_rects(bgr, my_base_range,    50,  5000, _precomp=_precomp)
+        rival_bases_raw = get_rects(bgr, rival_base_range, 200, 5000, _precomp=_precomp)
+
+        # Filtrar por área mínima y lado mínimo
+        my_bases    = filter_bases_by_area(my_bases_raw,    min_area=300, min_side=12)
+        rival_bases = filter_bases_by_area(rival_bases_raw, min_area=650, min_side=18)
+
+        # Pares de colores → rol según el uniforme activo del torneo
+        role_pairs = get_role_color_pairs(my_color)
+
+        # Detectar marcadores de colores (incluye 'rojo' si está calibrado)
+        markers_p = get_rects(bgr, colors['rosa'],  15, 2000, _precomp=_precomp)
+        markers_g = get_rects(bgr, colors['verde'], 15, 2000, _precomp=_precomp)
+        markers_b = get_rects(bgr, colors['azul'],  15, 2000, _precomp=_precomp)
+        markers_r = get_rects(bgr, colors['rojo'],  15, 2000, _precomp=_precomp) \
+                    if 'rojo' in colors else []
+
+        available_markers = {
+            'rosa':     markers_p,
+            'verde':    markers_g,
+            'azul':     markers_b,
+            'rojo':     markers_r,
+            'amarillo': get_rects(bgr, colors['amarillo'], 15, 2000, _precomp=_precomp)
+                        if my_color == 'azul' else [],
         }
-    else:   # azul
-        return {
-            ('rosa',     'verde'): robot_DEL,
-            ('amarillo', 'rojo'):  robot_POR,
-        }
+
+        # Filtrar marcadores: excluir los que están sobre bases propias O rivales
+        filtered_my    = filter_out_base_markers(my_bases + rival_bases, available_markers)
+        filtered_rival = filter_out_base_markers(rival_bases, available_markers)
+
+        # ── Robots propios ────────────────────────────────────────
+        own = {role: None for role in ACTIVE_ROLES}
+        used_markers = set()
+
+        for base in my_bases:
+            (bx, by), (bw, bh), _ = base
+            base_center = np.array([bx, by])
+            radius      = max(bw, bh) * 1.5
+
+            # Marcador más cercano de cada color (3-tupla: idx, pos, dist)
+            closest_of_color = {}
+            for color_name, marker_list in filtered_my.items():
+                candidate, min_d = None, radius
+                for i, m in enumerate(marker_list):
+                    (mx, my2), _, _ = m
+                    d = np.hypot(mx - bx, my2 - by)
+                    if d < min_d:
+                        min_d     = d
+                        candidate = (i, np.array([mx, my2]), d)
+                if candidate is not None:
+                    closest_of_color[color_name] = candidate
+
+            pair, role = choose_role_markers(closest_of_color, role_pairs)
+            if pair is None:
+                continue
+
+            idx1, idx2 = closest_of_color[pair[0]][0], closest_of_color[pair[1]][0]
+            if (pair[0], idx1) in used_markers or (pair[1], idx2) in used_markers:
+                continue
+            used_markers.add((pair[0], idx1))
+            used_markers.add((pair[1], idx2))
+
+            pos1 = closest_of_color[pair[0]][1]
+            pos2 = closest_of_color[pair[1]][1]
+            mean_pos     = (pos1 + pos2) / 2.0
+            front_vector = mean_pos - base_center
+            angle_deg    = (np.degrees(np.arctan2(front_vector[1], front_vector[0])) + 360) % 360
+
+            if ROBOT_FRONT_SIGN.get(role, 1) == -1:
+                angle_deg = (angle_deg + 180) % 360
+
+            own[role] = {'pos': (int(bx), int(by)), 'angle': angle_deg}
+
+        # ── Robots rivales ────────────────────────────────────────
+        # Filtrar falsos rivales que caen cerca de robots propios ya identificados
+        rival_bases    = filter_rival_bases_near_own(rival_bases, own)
+        filtered_rival = filter_out_base_markers(rival_bases, available_markers)
+
+        rivals = []
+        for base in rival_bases:
+            (bx, by), (bw, bh), _ = base
+            base_center = np.array([bx, by])
+            radius      = max(bw, bh) * 1.5
+
+            closest_marker, min_dist_m = None, radius
+            for color_name, marker_list in filtered_rival.items():
+                for m in marker_list:
+                    (mx, my2), _, _ = m
+                    d = np.hypot(mx - bx, my2 - by)
+                    if d < min_dist_m:
+                        min_dist_m    = d
+                        closest_marker = np.array([mx, my2])
+
+            if closest_marker is not None:
+                fv    = base_center - closest_marker
+                angle = (np.degrees(np.arctan2(fv[1], fv[0])) + 360) % 360
+                rivals.append({'pos': (int(bx), int(by)), 'angle': angle})
+
+        return own, rivals
+
+
+# Alias públicos para conservar compatibilidad con el código existente.
+get_role_color_pairs = TeamVision.get_role_color_pairs
+lab_polar_mask = TeamVision.lab_polar_mask
+detect_ball = TeamVision.detect_ball
+get_rects = TeamVision.get_rects
+get_closest_marker_center = TeamVision.get_closest_marker_center
+filter_bases_by_area = TeamVision.filter_bases_by_area
+filter_rival_bases_near_own = TeamVision.filter_rival_bases_near_own
+filter_out_base_markers = TeamVision.filter_out_base_markers
+choose_role_markers = TeamVision.choose_role_markers
+identify_team = TeamVision.identify_team
 
 # Alias estático para compatibilidad con código externo (se usa my_color='azul' por defecto)
 ROLE_COLOR_PAIRS = get_role_color_pairs('azul')
@@ -182,396 +489,328 @@ DT     = 1.0 / 30.0
 
 _MORPH_KERNEL_3x3 = np.ones((3, 3), np.uint8)
 
-def control_pid_angular(error, dt, integral, prev_error):
-    integral = max(min(integral + error * dt, 50), -50)
-    derivada = (error - prev_error) / dt if dt > 0 else 0
-    output   = Kp_ang * error + Ki_ang * integral + Kd_ang * derivada
-    return output, integral, error
+class MotionController:
+    """Control angular, PWM y navegación segura."""
+
+    @staticmethod
+    def control_pid_angular(error, dt, integral, prev_error):
+        integral = max(min(integral + error * dt, 50), -50)
+        derivada = (error - prev_error) / dt if dt > 0 else 0
+        output   = Kp_ang * error + Ki_ang * integral + Kd_ang * derivada
+        return output, integral, error
+
+
+    @staticmethod
+    def aplicar_repulsion(mi_pos, target, obstaculos, radio_colision, fuerza_max, dist_to_target=0):
+        tx, ty = target
+        rx, ry = mi_pos
+        factor = max(0.0, min(1.0, dist_to_target / 120.0)) if dist_to_target > 0 else 1.0
+        for ox, oy in obstaculos:
+            dist = np.hypot(ox - rx, oy - ry)
+            if 0 < dist < radio_colision:
+                dx, dy = rx - ox, ry - oy
+                mag    = np.hypot(dx, dy) + 1e-8
+                fuerza = min((radio_colision - dist) / radio_colision * fuerza_max * factor, 30)
+                tx += (dx / mag) * fuerza
+                ty += (dy / mag) * fuerza
+        return int(tx), int(ty)
+
+
+    @staticmethod
+    def aplicar_repulsion_bordes(tx, ty, rx, ry, frame_w, frame_h, borde, fuerza):
+        fx = fy = 0
+        if rx < borde:           fx += (1.0 - rx / borde) * fuerza
+        if rx > frame_w - borde: fx -= (1.0 - (frame_w - rx) / borde) * fuerza
+        if ry < borde:           fy += (1.0 - ry / borde) * fuerza
+        if ry > frame_h - borde: fy -= (1.0 - (frame_h - ry) / borde) * fuerza
+        return max(0, min(frame_w, int(tx + fx))), max(0, min(frame_h, int(ty + fy)))
+
+
+    @staticmethod
+    def compute_pwm(turn, speed):
+        """PID angular directo → PWM izq/der."""
+        if speed == 0:
+            if turn != 0:
+                left  = int(np.clip(-turn * 2.5, -255, 255))
+                right = int(np.clip( turn * 2.5, -255, 255))
+                return f"{left},{right}"
+            return "0,0"
+        base  = 150
+        left  = int(np.clip(base - turn * 1.5, -255, 255))
+        right = int(np.clip(base + turn * 1.5, -255, 255))
+        return f"{left},{right}"
+
+
+    @staticmethod
+    def compute_pwm_stable(error_ang, dist, stop_distance=28):
+        """Alinea primero si el error es grande, luego avanza. Más estable."""
+        if dist <= stop_distance:
+            return "0,0"
+        if abs(error_ang) > ANGLE_TURN_ONLY:
+            turn_pwm = int(np.clip(error_ang * 1.4, -PWM_MAX, PWM_MAX))
+            return f"{-turn_pwm},{turn_pwm}"
+        turn = 0 if abs(error_ang) <= ANGLE_DEADBAND else int(np.clip(error_ang * 0.65, -42, 42))
+        base = PWM_BASE_SPEED
+        left  = int(np.clip(base - turn * PWM_TURN_FACTOR_MOVING, -PWM_MAX, PWM_MAX))
+        right = int(np.clip(base + turn * PWM_TURN_FACTOR_MOVING, -PWM_MAX, PWM_MAX))
+        return f"{left},{right}"
+
+
+    @staticmethod
+    def apply_robot_calibration(cmd, role):
+        """Escala PWM por motor para compensar desequilibrios físicos."""
+        try:
+            left, right = [int(x) for x in cmd.split(',')]
+        except Exception:
+            return cmd
+        cal   = ROBOT_PWM_CALIBRATION.get(role, {'left': 1.0, 'right': 1.0})
+        left  = int(np.clip(left  * cal['left'],  -PWM_MAX, PWM_MAX))
+        right = int(np.clip(right * cal['right'], -PWM_MAX, PWM_MAX))
+        return f"{left},{right}"
+
+
+    @staticmethod
+    def target_error_and_dist(robot, target):
+        rx, ry  = robot['pos']
+        tx, ty  = target
+        dist    = np.hypot(tx - rx, ty - ry)
+        ang_obj = (np.degrees(np.arctan2(ty - ry, tx - rx)) + 360) % 360
+        error   = ((ang_obj - robot['angle'] + 180) % 360) - 180
+        return error, dist
+
+
+    @staticmethod
+    def drive_to_point_stable(robot, target, stop_distance=28):
+        if robot is None or target is None:
+            return "0,0", None
+        error, dist = target_error_and_dist(robot, target)
+        return compute_pwm_stable(error, dist, stop_distance), target
+
+
+    @staticmethod
+    def drive_to_point_safe(robot, target, frame_w, frame_h, stop_distance=28):
+        if robot is None or target is None:
+            return "0,0", None
+        rx, ry = robot['pos']
+        tx, ty = target
+        near_wall = ((rx < FIELD_SAFE_MARGIN and tx <= rx) or
+                     (rx > frame_w - FIELD_SAFE_MARGIN and tx >= rx) or
+                     (ry < FIELD_SAFE_MARGIN and ty <= ry) or
+                     (ry > frame_h - FIELD_SAFE_MARGIN and ty >= ry))
+        if near_wall:
+            center = (frame_w // 2, frame_h // 2)
+            cmd, _ = drive_to_point_stable(robot, center, stop_distance=9999)
+            return cmd, center
+        return drive_to_point_stable(robot, target, stop_distance)
+
+
+    @staticmethod
+    def search_pwm(role):
+        """Giro suave diferenciado por rol cuando el robot no es visto."""
+        if role == robot_POR: return compute_pwm(-12, 0)
+        return compute_pwm(14, 0)
+
+
+    @staticmethod
+    def clamp_point(point, w, h, margin=25):
+        x, y = point
+        return (int(np.clip(x, margin, w - margin)),
+                int(np.clip(y, margin, h - margin)))
+
+
+    @staticmethod
+    def keep_out_goal_areas(point, own_goal, opp_goal, w, h, margin=12):
+        """Mantiene al delantero fuera del área propia; permite atacar el arco rival."""
+        x, y       = point
+        area_depth = int(w * GOAL_AREA_DEPTH_RATIO)
+        area_half  = int(h * GOAL_AREA_HEIGHT_RATIO / 2)
+        goal_y     = h // 2
+        in_goal_y  = goal_y - area_half <= y <= goal_y + area_half
+        if in_goal_y:
+            if own_goal[0] == 0 and x < area_depth:
+                x = area_depth + margin
+            elif own_goal[0] != 0 and x > w - area_depth:
+                x = w - area_depth - margin
+        return clamp_point((x, y), w, h)
+
+
+    @staticmethod
+    def attack_geometry(ball, opp_goal, behind_distance, push_distance=95):
+        bx, by = ball
+        ox, oy = opp_goal
+        to_x   = bx - ox;  to_y = by - oy
+        mag    = np.hypot(to_x, to_y)
+        if mag <= 0:
+            return ball, ball
+        behind = (bx + (to_x / mag) * behind_distance,
+                  by + (to_y / mag) * behind_distance)
+        push   = (bx - (to_x / mag) * push_distance,
+                  by - (to_y / mag) * push_distance)
+        return behind, push
+
+
+    @staticmethod
+    def update_attacker_state(role, robot, ball, behind_target):
+        error_to_ball, dist_to_ball = target_error_and_dist(robot, ball)
+        _, dist_to_behind           = target_error_and_dist(robot, behind_target)
+        state = ROBOT_STATE.get(role, 'IR_DETRAS')
+
+        if dist_to_ball < 55 and abs(error_to_ball) < 28:
+            state = 'EMPUJAR'
+        elif dist_to_behind < 42:
+            state = 'ALINEAR'
+        elif state == 'EMPUJAR' and dist_to_ball < 90:
+            state = 'EMPUJAR'
+        else:
+            state = 'IR_DETRAS'
+
+        ROBOT_STATE[role] = state
+        return state
+
+
+# Alias públicos para conservar compatibilidad con el código existente.
+control_pid_angular = MotionController.control_pid_angular
+aplicar_repulsion = MotionController.aplicar_repulsion
+aplicar_repulsion_bordes = MotionController.aplicar_repulsion_bordes
+compute_pwm = MotionController.compute_pwm
+compute_pwm_stable = MotionController.compute_pwm_stable
+apply_robot_calibration = MotionController.apply_robot_calibration
+target_error_and_dist = MotionController.target_error_and_dist
+drive_to_point_stable = MotionController.drive_to_point_stable
+drive_to_point_safe = MotionController.drive_to_point_safe
+search_pwm = MotionController.search_pwm
+clamp_point = MotionController.clamp_point
+keep_out_goal_areas = MotionController.keep_out_goal_areas
+attack_geometry = MotionController.attack_geometry
+update_attacker_state = MotionController.update_attacker_state
 
 # ============================================================
 # FUNCIONES AUXILIARES JSON
 # ============================================================
-def load_json(file_path):
-    try:
-        with open(file_path, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error cargando {file_path}: {e}")
-        return None
+class JsonStorage:
+    """Persistencia de configuraciones JSON."""
 
-def save_json(file_path, data):
-    try:
-        with open(file_path, 'w') as f:
-            json.dump(data, f, indent=2)
-        return True
-    except Exception as e:
-        print(f"Error guardando {file_path}: {e}")
-        return False
+    @staticmethod
+    def load_json(file_path):
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error cargando {file_path}: {e}")
+            return None
+
+
+    @staticmethod
+    def save_json(file_path, data):
+        try:
+            with open(file_path, 'w') as f:
+                json.dump(data, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error guardando {file_path}: {e}")
+            return False
+
+
+# Alias públicos para conservar compatibilidad con el código existente.
+load_json = JsonStorage.load_json
+save_json = JsonStorage.save_json
+
 
 # ============================================================
 # UTILIDADES DE IMAGEN
 # ============================================================
-def order_points_clockwise(pts):
-    rect = np.zeros((4, 2), dtype="float32")
-    pts  = np.array(pts, dtype="float32")
-    s    = pts.sum(axis=1)
-    diff = np.diff(pts, axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    return rect
+class ImageProcessing:
+    """Transformaciones y ajustes de imagen."""
 
-def init_kalman():
-    kf = cv2.KalmanFilter(6, 2, 0)
-    kf.transitionMatrix = np.array([
-        [1,0,1,0,0.5,0],[0,1,0,1,0,0.5],
-        [0,0,1,0,1,0],[0,0,0,1,0,1],
-        [0,0,0,0,1,0],[0,0,0,0,0,1]
-    ], np.float32)
-    kf.measurementMatrix   = np.array([[1,0,0,0,0,0],[0,1,0,0,0,0]], np.float32)
-    kf.processNoiseCov     = np.eye(6, dtype=np.float32) * 1e-3
-    kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
-    return kf
+    def __init__(self):
+        self._undistort_cache = {}
+        self._warp_cache = {}
 
-_undistort_cache: dict = {}
+    def order_points_clockwise(self, pts):
+        rect = np.zeros((4, 2), dtype="float32")
+        pts  = np.array(pts, dtype="float32")
+        s    = pts.sum(axis=1)
+        diff = np.diff(pts, axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
+        return rect
 
-def undistort_frame(frame, camera_matrix, dist_coeffs):
-    if camera_matrix is not None and dist_coeffs is not None:
-        h, w = frame.shape[:2]
-        key = (id(camera_matrix), w, h)
-        if key not in _undistort_cache:
-            newcameramtx, _ = cv2.getOptimalNewCameraMatrix(
-                camera_matrix, dist_coeffs, (w, h), 1, (w, h))
-            _undistort_cache[key] = newcameramtx
-        return cv2.undistort(frame, camera_matrix, dist_coeffs, None, _undistort_cache[key])
-    return frame
 
-_warp_cache: dict = {}
+    def init_kalman(self):
+        kf = cv2.KalmanFilter(6, 2, 0)
+        kf.transitionMatrix = np.array([
+            [1,0,1,0,0.5,0],[0,1,0,1,0,0.5],
+            [0,0,1,0,1,0],[0,0,0,1,0,1],
+            [0,0,0,0,1,0],[0,0,0,0,0,1]
+        ], np.float32)
+        kf.measurementMatrix   = np.array([[1,0,0,0,0,0],[0,1,0,0,0,0]], np.float32)
+        kf.processNoiseCov     = np.eye(6, dtype=np.float32) * 1e-3
+        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
+        return kf
 
-def warp_image(frame, src_pts, output_size=BASE_RESOLUTION):
-    key = (tuple(map(tuple, src_pts)), output_size)
-    if key not in _warp_cache:
-        sp  = order_points_clockwise(src_pts)
-        ul, ur, lr, ll = sp
-        src = np.array([ul, ur, lr, ll], dtype="float32")
-        nW, nH = output_size
-        dst = np.array([[0,0],[nW-1,0],[nW-1,nH-1],[0,nH-1]], dtype="float32")
-        _warp_cache[key] = (cv2.getPerspectiveTransform(src, dst), nW, nH)
-    M, nW, nH = _warp_cache[key]
-    return cv2.warpPerspective(frame, M, (nW, nH), flags=cv2.INTER_CUBIC), nW, nH
 
-def adjust_image(frame, brightness=128, contrast=128, saturation=128, exposure=-6):
-    """Ajuste de imagen en software (AVFoundation ignora CAP_PROP_BRIGHTNESS, etc.)."""
-    ev_delta   = exposure - (-6)
-    exp_factor = float(np.clip(2.0 ** ev_delta, 0.1, 8.0))
-    alpha = (contrast / 128.0) * exp_factor
-    beta  = brightness - 128.0
-    frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
-    if abs(saturation - 128) > 2:
-        s_factor = saturation / 128.0
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * s_factor, 0, 255)
-        frame = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    return frame
+    def undistort_frame(self, frame, camera_matrix, dist_coeffs):
+        if camera_matrix is not None and dist_coeffs is not None:
+            h, w = frame.shape[:2]
+            key = (id(camera_matrix), w, h)
+            if key not in self._undistort_cache:
+                newcameramtx, _ = cv2.getOptimalNewCameraMatrix(
+                    camera_matrix, dist_coeffs, (w, h), 1, (w, h))
+                self._undistort_cache[key] = newcameramtx
+            return cv2.undistort(frame, camera_matrix, dist_coeffs, None, self._undistort_cache[key])
+        return frame
 
-# ============================================================
-# DETECCIÓN Lab POLAR
-# ============================================================
-def lab_polar_mask(bgr, l_min, l_max, r_min, r_max, t_min, t_max, _precomp=None):
-    """Máscara binaria en espacio Lab polar (L, Chroma, Ángulo)."""
-    if _precomp is not None:
-        l_ch, mag, angle = _precomp
-    else:
-        lab  = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-        l_ch = lab[:, :, 0]
-        a    = lab[:, :, 1].astype(np.float32) - 128.0
-        b    = lab[:, :, 2].astype(np.float32) - 128.0
-        mag, angle = cv2.cartToPolar(a, b, angleInDegrees=True)
-    mask_l = cv2.inRange(l_ch, int(l_min), int(l_max))
-    mask_r = cv2.inRange(mag, float(r_min), float(r_max))
-    if t_min <= t_max:
-        mask_t = cv2.inRange(angle, float(t_min), float(t_max))
-    else:
-        mask_t = cv2.bitwise_or(
-            cv2.inRange(angle, float(t_min), 360.0),
-            cv2.inRange(angle, 0.0, float(t_max))
-        )
-    return cv2.bitwise_and(mask_l, cv2.bitwise_and(mask_r, mask_t))
 
-def detect_ball(bgr, lab_range, _precomp=None, last_pos=None):
-    """
-    Detecta la pelota con Lab polar + filtros de circularidad y fill ratio.
+    def warp_image(self, frame, src_pts, output_size=BASE_RESOLUTION):
+        key = (tuple(map(tuple, src_pts)), output_size)
+        if key not in self._warp_cache:
+            sp  = self.order_points_clockwise(src_pts)
+            ul, ur, lr, ll = sp
+            src = np.array([ul, ur, lr, ll], dtype="float32")
+            nW, nH = output_size
+            dst = np.array([[0,0],[nW-1,0],[nW-1,nH-1],[0,nH-1]], dtype="float32")
+            self._warp_cache[key] = (cv2.getPerspectiveTransform(src, dst), nW, nH)
+        M, nW, nH = self._warp_cache[key]
+        return cv2.warpPerspective(frame, M, (nW, nH), flags=cv2.INTER_CUBIC), nW, nH
 
-    last_pos : última posición DETECTADA (no predicción Kalman).
-               Se usa como desempate suave entre candidatos igualmente válidos.
-               No debe usarse la predicción Kalman aquí para evitar bucles de
-               realimentación que desplazan la detección hacia posiciones erróneas.
-    """
-    mask = lab_polar_mask(bgr, **lab_range, _precomp=_precomp)
 
-    h, w = mask.shape[:2]
-    border = 20
-    mask[:border, :]   = 0
-    mask[h-border:, :] = 0
-    mask[:, :border]   = 0
-    mask[:, w-border:] = 0
+    def adjust_image(self, frame, brightness=128, contrast=128, saturation=128, exposure=-6):
+        """Ajuste de imagen en software (AVFoundation ignora CAP_PROP_BRIGHTNESS, etc.)."""
+        ev_delta   = exposure - (-6)
+        exp_factor = float(np.clip(2.0 ** ev_delta, 0.1, 8.0))
+        alpha = (contrast / 128.0) * exp_factor
+        beta  = brightness - 128.0
+        frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
+        if abs(saturation - 128) > 2:
+            s_factor = saturation / 128.0
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * s_factor, 0, 255)
+            frame = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        return frame
 
-    # Solo MORPH_OPEN: elimina ruido puntual sin crear blobs falsos.
-    # SIN GaussianBlur (desplaza centroides en máscaras binarias).
-    # SIN MORPH_CLOSE (une manchas distantes y genera pelotas fantasma).
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_KERNEL_3x3)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    best = None
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area < 40 or area > 1200:
-            continue
-        (x, y), radius = cv2.minEnclosingCircle(c)
-        if radius < 4 or radius > 22:
-            continue
-        perim = cv2.arcLength(c, True)
-        if perim <= 0:
-            continue
-        circularity = 4 * np.pi * area / (perim * perim)
-        fill_ratio  = area / (np.pi * radius * radius)
-        if circularity < 0.45 or fill_ratio < 0.35:
-            continue
-        # Centroide por momentos: más preciso que minEnclosingCircle
-        M = cv2.moments(c)
-        if M["m00"] > 0:
-            x = M["m10"] / M["m00"]
-            y = M["m01"] / M["m00"]
-        score = area * circularity * fill_ratio
-        # Bonus pequeño por cercanía a la última posición detectada real.
-        # Máximo +40 para desempatar sin contaminar la elección principal.
-        if last_pos is not None:
-            dist   = np.hypot(x - last_pos[0], y - last_pos[1])
-            score += max(0.0, 40.0 - dist)
-        if best is None or score > best[0]:
-            best = (score, int(x), int(y))
-    return (best[1], best[2]) if best else None
+image_processing = ImageProcessing()
 
-def get_rects(bgr, lab_range, min_a=15, max_a=5000, _precomp=None):
-    mask = lab_polar_mask(bgr, **lab_range, _precomp=_precomp)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_KERNEL_3x3)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return [cv2.minAreaRect(c) for c in contours if min_a < cv2.contourArea(c) < max_a]
+# Alias públicos para conservar compatibilidad con el código existente.
+order_points_clockwise = image_processing.order_points_clockwise
+init_kalman = image_processing.init_kalman
+undistort_frame = image_processing.undistort_frame
+warp_image = image_processing.warp_image
+adjust_image = image_processing.adjust_image
 
-def get_closest_marker_center(base_center, markers, radius):
-    closest, min_dist = None, radius
-    for m in markers:
-        (mx, my), _, _ = m
-        d = np.hypot(mx - base_center[0], my - base_center[1])
-        if d < min_dist:
-            min_dist = d
-            closest  = np.array([mx, my])
-    return closest
 
-# ============================================================
-# FILTROS DE DETECCIÓN
-# ============================================================
-def filter_bases_by_area(bases, min_area=250, min_side=12):
-    """Evita que marcadores chicos se tomen como bases de robot."""
-    filtered = []
-    for base in bases:
-        (_, _), (w, h), _ = base
-        if w * h >= min_area and min(w, h) >= min_side:
-            filtered.append(base)
-    return filtered
+_undistort_cache: dict = image_processing._undistort_cache
 
-def filter_rival_bases_near_own(rival_bases, own, min_dist=55):
-    """Descarta falsos rivales provocados por marcadores dentro de robots propios."""
-    own_positions = [r['pos'] for r in own.values() if r is not None]
-    filtered = []
-    for base in rival_bases:
-        (bx, by), _, _ = base
-        if not any(np.hypot(bx - ox, by - oy) < min_dist for ox, oy in own_positions):
-            filtered.append(base)
-    return filtered
 
-def filter_out_base_markers(bases, markers_dict, min_dist=10):
-    """
-    Elimina marcadores cuyo centro esté a menos de min_dist del centro de alguna base
-    Y cuya área sea >= 40% del área de esa base (los stickers pequeños sobreviven).
-    """
-    filtered = {}
-    for color_name, marker_list in markers_dict.items():
-        filtered[color_name] = []
-        for m in marker_list:
-            (mx, my), (mw, mh), _ = m
-            keep = True
-            for base in bases:
-                (bx, by), (bw, bh), _ = base
-                if np.hypot(mx - bx, my - by) < min_dist:
-                    if (mw * mh) >= (bw * bh) * 0.40:
-                        keep = False
-                        break
-            if keep:
-                filtered[color_name].append(m)
-    return filtered
+_warp_cache: dict = image_processing._warp_cache
 
-def choose_role_markers(closest_of_color, role_pairs=None):
-    """
-    Elige el par válido de marcadores más cercano a la base.
-    Evita que un tercer color cercano rompa la identificación del rol.
-    closest_of_color: {color: (idx, pos, dist)}
-    role_pairs: dict par→rol (por defecto usa ROLE_COLOR_PAIRS global)
-    """
-    if role_pairs is None:
-        role_pairs = ROLE_COLOR_PAIRS
-    best = None
-    for pair, role in role_pairs.items():
-        if pair[0] not in closest_of_color or pair[1] not in closest_of_color:
-            continue
-        dist_sum = closest_of_color[pair[0]][2] + closest_of_color[pair[1]][2]
-        if best is None or dist_sum < best[0]:
-            best = (dist_sum, pair, role)
-    if best is None:
-        return None, None
-    return best[1], best[2]
-
-# ============================================================
-# IDENTIFICACIÓN DE ROBOTS
-# ============================================================
-def identify_team(bgr, colors, my_color, _precomp=None):
-    """
-    Identifica los dos roles propios POR/DEL y los robots rivales.
-    Usa espacio Lab polar. Integra filtros de GApp para mayor robustez.
-    """
-    if my_color == 'azul':
-        my_base_range    = colors['azul']
-        rival_base_range = colors['amarillo']
-    else:
-        my_base_range    = colors['amarillo']
-        rival_base_range = colors['azul']
-
-    # Detectar bases: rivales con min_a mayor para evitar confusión con stickers
-    my_bases_raw    = get_rects(bgr, my_base_range,    50,  5000, _precomp=_precomp)
-    rival_bases_raw = get_rects(bgr, rival_base_range, 200, 5000, _precomp=_precomp)
-
-    # Filtrar por área mínima y lado mínimo
-    my_bases    = filter_bases_by_area(my_bases_raw,    min_area=300, min_side=12)
-    rival_bases = filter_bases_by_area(rival_bases_raw, min_area=650, min_side=18)
-
-    # Pares de colores → rol según el uniforme activo del torneo
-    role_pairs = get_role_color_pairs(my_color)
-
-    # Detectar marcadores de colores (incluye 'rojo' si está calibrado)
-    markers_p = get_rects(bgr, colors['rosa'],  15, 2000, _precomp=_precomp)
-    markers_g = get_rects(bgr, colors['verde'], 15, 2000, _precomp=_precomp)
-    markers_b = get_rects(bgr, colors['azul'],  15, 2000, _precomp=_precomp)
-    markers_r = get_rects(bgr, colors['rojo'],  15, 2000, _precomp=_precomp) \
-                if 'rojo' in colors else []
-
-    available_markers = {
-        'rosa':     markers_p,
-        'verde':    markers_g,
-        'azul':     markers_b,
-        'rojo':     markers_r,
-        'amarillo': get_rects(bgr, colors['amarillo'], 15, 2000, _precomp=_precomp)
-                    if my_color == 'azul' else [],
-    }
-
-    # Filtrar marcadores: excluir los que están sobre bases propias O rivales
-    filtered_my    = filter_out_base_markers(my_bases + rival_bases, available_markers)
-    filtered_rival = filter_out_base_markers(rival_bases, available_markers)
-
-    # ── Robots propios ────────────────────────────────────────
-    own = {role: None for role in ACTIVE_ROLES}
-    used_markers = set()
-
-    for base in my_bases:
-        (bx, by), (bw, bh), _ = base
-        base_center = np.array([bx, by])
-        radius      = max(bw, bh) * 1.5
-
-        # Marcador más cercano de cada color (3-tupla: idx, pos, dist)
-        closest_of_color = {}
-        for color_name, marker_list in filtered_my.items():
-            candidate, min_d = None, radius
-            for i, m in enumerate(marker_list):
-                (mx, my2), _, _ = m
-                d = np.hypot(mx - bx, my2 - by)
-                if d < min_d:
-                    min_d     = d
-                    candidate = (i, np.array([mx, my2]), d)
-            if candidate is not None:
-                closest_of_color[color_name] = candidate
-
-        pair, role = choose_role_markers(closest_of_color, role_pairs)
-        if pair is None:
-            continue
-
-        idx1, idx2 = closest_of_color[pair[0]][0], closest_of_color[pair[1]][0]
-        if (pair[0], idx1) in used_markers or (pair[1], idx2) in used_markers:
-            continue
-        used_markers.add((pair[0], idx1))
-        used_markers.add((pair[1], idx2))
-
-        pos1 = closest_of_color[pair[0]][1]
-        pos2 = closest_of_color[pair[1]][1]
-        mean_pos     = (pos1 + pos2) / 2.0
-        front_vector = mean_pos - base_center
-        angle_deg    = (np.degrees(np.arctan2(front_vector[1], front_vector[0])) + 360) % 360
-
-        if ROBOT_FRONT_SIGN.get(role, 1) == -1:
-            angle_deg = (angle_deg + 180) % 360
-
-        own[role] = {'pos': (int(bx), int(by)), 'angle': angle_deg}
-
-    # ── Robots rivales ────────────────────────────────────────
-    # Filtrar falsos rivales que caen cerca de robots propios ya identificados
-    rival_bases    = filter_rival_bases_near_own(rival_bases, own)
-    filtered_rival = filter_out_base_markers(rival_bases, available_markers)
-
-    rivals = []
-    for base in rival_bases:
-        (bx, by), (bw, bh), _ = base
-        base_center = np.array([bx, by])
-        radius      = max(bw, bh) * 1.5
-
-        closest_marker, min_dist_m = None, radius
-        for color_name, marker_list in filtered_rival.items():
-            for m in marker_list:
-                (mx, my2), _, _ = m
-                d = np.hypot(mx - bx, my2 - by)
-                if d < min_dist_m:
-                    min_dist_m    = d
-                    closest_marker = np.array([mx, my2])
-
-        if closest_marker is not None:
-            fv    = base_center - closest_marker
-            angle = (np.degrees(np.arctan2(fv[1], fv[0])) + 360) % 360
-            rivals.append({'pos': (int(bx), int(by)), 'angle': angle})
-
-    return own, rivals
 
 # ============================================================
 # FUNCIONES DE REPULSIÓN Y PREDICTOR
 # ============================================================
-def aplicar_repulsion(mi_pos, target, obstaculos, radio_colision, fuerza_max, dist_to_target=0):
-    tx, ty = target
-    rx, ry = mi_pos
-    factor = max(0.0, min(1.0, dist_to_target / 120.0)) if dist_to_target > 0 else 1.0
-    for ox, oy in obstaculos:
-        dist = np.hypot(ox - rx, oy - ry)
-        if 0 < dist < radio_colision:
-            dx, dy = rx - ox, ry - oy
-            mag    = np.hypot(dx, dy) + 1e-8
-            fuerza = min((radio_colision - dist) / radio_colision * fuerza_max * factor, 30)
-            tx += (dx / mag) * fuerza
-            ty += (dy / mag) * fuerza
-    return int(tx), int(ty)
 
-def aplicar_repulsion_bordes(tx, ty, rx, ry, frame_w, frame_h, borde, fuerza):
-    fx = fy = 0
-    if rx < borde:           fx += (1.0 - rx / borde) * fuerza
-    if rx > frame_w - borde: fx -= (1.0 - (frame_w - rx) / borde) * fuerza
-    if ry < borde:           fy += (1.0 - ry / borde) * fuerza
-    if ry > frame_h - borde: fy -= (1.0 - (frame_h - ry) / borde) * fuerza
-    return max(0, min(frame_w, int(tx + fx))), max(0, min(frame_h, int(ty + fy)))
 
 class RobotPredictor:
     def __init__(self):
@@ -604,131 +843,6 @@ class RobotPredictor:
     def is_recovery(self):
         return self.lost_frames > MAX_LOST_FRAMES_RECOVERY
 
-# ============================================================
-# FUNCIONES PWM Y CONTROL DE MOVIMIENTO
-# ============================================================
-def compute_pwm(turn, speed):
-    """PID angular directo → PWM izq/der."""
-    if speed == 0:
-        if turn != 0:
-            left  = int(np.clip(-turn * 2.5, -255, 255))
-            right = int(np.clip( turn * 2.5, -255, 255))
-            return f"{left},{right}"
-        return "0,0"
-    base  = 150
-    left  = int(np.clip(base - turn * 1.5, -255, 255))
-    right = int(np.clip(base + turn * 1.5, -255, 255))
-    return f"{left},{right}"
-
-def compute_pwm_stable(error_ang, dist, stop_distance=28):
-    """Alinea primero si el error es grande, luego avanza. Más estable."""
-    if dist <= stop_distance:
-        return "0,0"
-    if abs(error_ang) > ANGLE_TURN_ONLY:
-        turn_pwm = int(np.clip(error_ang * 1.4, -PWM_MAX, PWM_MAX))
-        return f"{-turn_pwm},{turn_pwm}"
-    turn = 0 if abs(error_ang) <= ANGLE_DEADBAND else int(np.clip(error_ang * 0.65, -42, 42))
-    base = PWM_BASE_SPEED
-    left  = int(np.clip(base - turn * PWM_TURN_FACTOR_MOVING, -PWM_MAX, PWM_MAX))
-    right = int(np.clip(base + turn * PWM_TURN_FACTOR_MOVING, -PWM_MAX, PWM_MAX))
-    return f"{left},{right}"
-
-def apply_robot_calibration(cmd, role):
-    """Escala PWM por motor para compensar desequilibrios físicos."""
-    try:
-        left, right = [int(x) for x in cmd.split(',')]
-    except Exception:
-        return cmd
-    cal   = ROBOT_PWM_CALIBRATION.get(role, {'left': 1.0, 'right': 1.0})
-    left  = int(np.clip(left  * cal['left'],  -PWM_MAX, PWM_MAX))
-    right = int(np.clip(right * cal['right'], -PWM_MAX, PWM_MAX))
-    return f"{left},{right}"
-
-def target_error_and_dist(robot, target):
-    rx, ry  = robot['pos']
-    tx, ty  = target
-    dist    = np.hypot(tx - rx, ty - ry)
-    ang_obj = (np.degrees(np.arctan2(ty - ry, tx - rx)) + 360) % 360
-    error   = ((ang_obj - robot['angle'] + 180) % 360) - 180
-    return error, dist
-
-def drive_to_point_stable(robot, target, stop_distance=28):
-    if robot is None or target is None:
-        return "0,0", None
-    error, dist = target_error_and_dist(robot, target)
-    return compute_pwm_stable(error, dist, stop_distance), target
-
-def drive_to_point_safe(robot, target, frame_w, frame_h, stop_distance=28):
-    if robot is None or target is None:
-        return "0,0", None
-    rx, ry = robot['pos']
-    tx, ty = target
-    near_wall = ((rx < FIELD_SAFE_MARGIN and tx <= rx) or
-                 (rx > frame_w - FIELD_SAFE_MARGIN and tx >= rx) or
-                 (ry < FIELD_SAFE_MARGIN and ty <= ry) or
-                 (ry > frame_h - FIELD_SAFE_MARGIN and ty >= ry))
-    if near_wall:
-        center = (frame_w // 2, frame_h // 2)
-        cmd, _ = drive_to_point_stable(robot, center, stop_distance=9999)
-        return cmd, center
-    return drive_to_point_stable(robot, target, stop_distance)
-
-def search_pwm(role):
-    """Giro suave diferenciado por rol cuando el robot no es visto."""
-    if role == robot_POR: return compute_pwm(-12, 0)
-    return compute_pwm(14, 0)
-
-# ============================================================
-# HELPERS DE ESTRATEGIA
-# ============================================================
-def clamp_point(point, w, h, margin=25):
-    x, y = point
-    return (int(np.clip(x, margin, w - margin)),
-            int(np.clip(y, margin, h - margin)))
-
-def keep_out_goal_areas(point, own_goal, opp_goal, w, h, margin=12):
-    """Mantiene al delantero fuera del área propia; permite atacar el arco rival."""
-    x, y       = point
-    area_depth = int(w * GOAL_AREA_DEPTH_RATIO)
-    area_half  = int(h * GOAL_AREA_HEIGHT_RATIO / 2)
-    goal_y     = h // 2
-    in_goal_y  = goal_y - area_half <= y <= goal_y + area_half
-    if in_goal_y:
-        if own_goal[0] == 0 and x < area_depth:
-            x = area_depth + margin
-        elif own_goal[0] != 0 and x > w - area_depth:
-            x = w - area_depth - margin
-    return clamp_point((x, y), w, h)
-
-def attack_geometry(ball, opp_goal, behind_distance, push_distance=95):
-    bx, by = ball
-    ox, oy = opp_goal
-    to_x   = bx - ox;  to_y = by - oy
-    mag    = np.hypot(to_x, to_y)
-    if mag <= 0:
-        return ball, ball
-    behind = (bx + (to_x / mag) * behind_distance,
-              by + (to_y / mag) * behind_distance)
-    push   = (bx - (to_x / mag) * push_distance,
-              by - (to_y / mag) * push_distance)
-    return behind, push
-
-def update_attacker_state(role, robot, ball, behind_target):
-    error_to_ball, dist_to_ball = target_error_and_dist(robot, ball)
-    _, dist_to_behind           = target_error_and_dist(robot, behind_target)
-    state = ROBOT_STATE.get(role, 'IR_DETRAS')
-
-    if dist_to_ball < 55 and abs(error_to_ball) < 28:
-        state = 'EMPUJAR'
-    elif dist_to_behind < 42:
-        state = 'ALINEAR'
-    elif state == 'EMPUJAR' and dist_to_ball < 90:
-        state = 'EMPUJAR'
-    else:
-        state = 'IR_DETRAS'
-
-    ROBOT_STATE[role] = state
-    return state
 
 # ============================================================
 # ESTRATEGIAS DE JUEGO
@@ -736,280 +850,305 @@ def update_attacker_state(role, robot, ball, behind_target):
 # ----------------------------------------------------------
 # PORTERO – BLOQUEO / DESPEJE con PID angular
 # ----------------------------------------------------------
-def strategy_portero(robot, ball, own_goal, opp_goal, w, h):
-    """
-    BLOQUEO : se posiciona en x=def_x interceptando la línea portería→pelota.
-              El clip Y usa la boca real del arco (GOAL_AREA_HEIGHT_RATIO).
-    DESPEJE : ≥ 2 frames con pelota en zona Y < 95 px → se pone detrás y despeja
-              hacia la banda lateral más cercana para alejar el peligro.
-    """
-    if robot is None:
-        return "0,0", None
+class GoalkeeperStrategy:
+    """Estrategia con memoria PID propia; invocable como la función original."""
 
-    rx, ry = robot['pos']
-    gx, gy = own_goal
-    ox, oy = opp_goal
+    def __call__(self, robot, ball, own_goal, opp_goal, w, h):
+        """
+        BLOQUEO : se posiciona en x=def_x interceptando la línea portería→pelota.
+                  El clip Y usa la boca real del arco (GOAL_AREA_HEIGHT_RATIO).
+        DESPEJE : ≥ 2 frames con pelota en zona Y < 95 px → se pone detrás y despeja
+                  hacia la banda lateral más cercana para alejar el peligro.
+        """
+        if robot is None:
+            return "0,0", None
 
-    goal_half_h = int(h * GOAL_AREA_HEIGHT_RATIO / 2)
-    goal_y_min  = h // 2 - goal_half_h
-    goal_y_max  = h // 2 + goal_half_h
-    area_depth  = int(w * GOAL_AREA_DEPTH_RATIO)
+        rx, ry = robot['pos']
+        gx, gy = own_goal
+        ox, oy = opp_goal
 
-    # POR confinado al área de portería (Sec. 2.4): X ≤ area_depth, Y dentro de boca de arco
-    if gx == 0:
-        def_x   = 70;  zona_lim = area_depth
-        en_zona = lambda bx: bx <= zona_lim
-        clamp_x = lambda x: int(np.clip(x, 20, zona_lim))
-    else:
-        def_x   = w - 70;  zona_lim = w - area_depth
-        en_zona = lambda bx: bx >= zona_lim
-        clamp_x = lambda x: int(np.clip(x, zona_lim, w - 20))
+        goal_half_h = int(h * GOAL_AREA_HEIGHT_RATIO / 2)
+        goal_y_min  = h // 2 - goal_half_h
+        goal_y_max  = h // 2 + goal_half_h
+        area_depth  = int(w * GOAL_AREA_DEPTH_RATIO)
 
-    if not hasattr(strategy_portero, '_st'):
-        strategy_portero._st = {
-            'integral': 0.0, 'prev_error': 0.0,
-            'zona_frames': 0, 'modo': 'BLOQUEO',
-        }
-    st = strategy_portero._st
-
-    if ball is not None:
-        bx, by    = ball
-        dist_bola = np.hypot(bx - rx, by - ry)
-
-        if en_zona(bx) and dist_bola < 95:
-            st['zona_frames'] = min(st['zona_frames'] + 1, 10)
+        # POR confinado al área de portería (Sec. 2.4): X ≤ area_depth, Y dentro de boca de arco
+        if gx == 0:
+            def_x   = 70;  zona_lim = area_depth
+            en_zona = lambda bx: bx <= zona_lim
+            clamp_x = lambda x: int(np.clip(x, 20, zona_lim))
         else:
-            st['zona_frames'] = max(st['zona_frames'] - 1, 0)
+            def_x   = w - 70;  zona_lim = w - area_depth
+            en_zona = lambda bx: bx >= zona_lim
+            clamp_x = lambda x: int(np.clip(x, zona_lim, w - 20))
 
-        modo_anterior = st['modo']
+        if not hasattr(self, '_st'):
+            self._st = {
+                'integral': 0.0, 'prev_error': 0.0,
+                'zona_frames': 0, 'modo': 'BLOQUEO',
+            }
+        st = self._st
 
-        if st['zona_frames'] >= 2:
-            # ── MODO DESPEJE: empuja hacia banda lateral más cercana ───────
-            # Posición de ataque: detrás de la pelota (lado del arco propio)
-            dx = bx - ox;  dy = by - oy
-            mag = np.hypot(dx, dy) + 1e-8
-            atk_x = clamp_x(bx + (dx / mag) * 35)
-            atk_y = int(np.clip(by + (dy / mag) * 35, goal_y_min, goal_y_max))
-            if np.hypot(atk_x - rx, atk_y - ry) < 22:
-                # Ya en posición: empujar hacia el borde de la boca del arco
-                lado_y = goal_y_min if by > h // 2 else goal_y_max
-                target_x = clamp_x(bx)
-                target_y = lado_y
+        if ball is not None:
+            bx, by    = ball
+            dist_bola = np.hypot(bx - rx, by - ry)
+
+            if en_zona(bx) and dist_bola < 95:
+                st['zona_frames'] = min(st['zona_frames'] + 1, 10)
             else:
-                target_x, target_y = atk_x, atk_y
-            st['modo'] = 'DESPEJE'
+                st['zona_frames'] = max(st['zona_frames'] - 1, 0)
+
+            modo_anterior = st['modo']
+
+            if st['zona_frames'] >= 2:
+                # ── MODO DESPEJE: empuja hacia banda lateral más cercana ───────
+                # Posición de ataque: detrás de la pelota (lado del arco propio)
+                dx = bx - ox;  dy = by - oy
+                mag = np.hypot(dx, dy) + 1e-8
+                atk_x = clamp_x(bx + (dx / mag) * 35)
+                atk_y = int(np.clip(by + (dy / mag) * 35, goal_y_min, goal_y_max))
+                if np.hypot(atk_x - rx, atk_y - ry) < 22:
+                    # Ya en posición: empujar hacia el borde de la boca del arco
+                    lado_y = goal_y_min if by > h // 2 else goal_y_max
+                    target_x = clamp_x(bx)
+                    target_y = lado_y
+                else:
+                    target_x, target_y = atk_x, atk_y
+                st['modo'] = 'DESPEJE'
+            else:
+                # ── MODO BLOQUEO: intercepta trayectoria de la pelota ─────────
+                if abs(bx - gx) > 1:
+                    t       = (def_x - gx) / float(bx - gx)
+                    y_block = gy + t * (by - gy)
+                else:
+                    y_block = by
+                target_x = def_x
+                target_y = int(np.clip(y_block, goal_y_min, goal_y_max))
+                st['modo'] = 'BLOQUEO'
+
+            if st['modo'] != modo_anterior:
+                st['integral']   = 0.0
+                st['prev_error'] = 0.0
         else:
-            # ── MODO BLOQUEO: intercepta trayectoria de la pelota ─────────
-            if abs(bx - gx) > 1:
-                t       = (def_x - gx) / float(bx - gx)
-                y_block = gy + t * (by - gy)
-            else:
-                y_block = by
-            target_x = def_x
-            target_y = int(np.clip(y_block, goal_y_min, goal_y_max))
-            st['modo'] = 'BLOQUEO'
+            st['zona_frames'] = 0
+            st['modo']        = 'BLOQUEO'
+            target_x, target_y = def_x, h // 2
 
-        if st['modo'] != modo_anterior:
-            st['integral']   = 0.0
-            st['prev_error'] = 0.0
-    else:
-        st['zona_frames'] = 0
-        st['modo']        = 'BLOQUEO'
-        target_x, target_y = def_x, h // 2
+        ang = robot['angle']
+        ang_to_tgt = (np.degrees(np.arctan2(target_y - ry, target_x - rx)) + 360) % 360
+        error_ang  = ((ang_to_tgt - ang + 180) % 360) - 180
 
-    ang = robot['angle']
-    ang_to_tgt = (np.degrees(np.arctan2(target_y - ry, target_x - rx)) + 360) % 360
-    error_ang  = ((ang_to_tgt - ang + 180) % 360) - 180
+        turn_pid, st['integral'], st['prev_error'] = \
+            control_pid_angular(error_ang, DT, st['integral'], st['prev_error'])
 
-    turn_pid, st['integral'], st['prev_error'] = \
-        control_pid_angular(error_ang, DT, st['integral'], st['prev_error'])
+        turn     = int(np.clip(turn_pid, -90, 90))
+        dist_tgt = np.hypot(target_x - rx, target_y - ry)
+        return compute_pwm(turn, 1 if dist_tgt > 20 else 0), (int(target_x), int(target_y))
 
-    turn     = int(np.clip(turn_pid, -90, 90))
-    dist_tgt = np.hypot(target_x - rx, target_y - ry)
-    return compute_pwm(turn, 1 if dist_tgt > 20 else 0), (int(target_x), int(target_y))
+
+strategy_portero = GoalkeeperStrategy()
 
 # ----------------------------------------------------------
 # DELANTERO – COBERTURA DEFENSIVA
 # ----------------------------------------------------------
-def strategy_cobertura_delantero(robot, ball, own_goal, opp_goal, w, h,
-                           obstaculos, frame_w, frame_h,
-                           radio_colision, fuerza_max, borde_seguridad, fuerza_borde):
-    """Cubre el tercio propio mientras la pelota está lejos del delantero."""
-    if robot is None:
-        return "0,0", None
+class GameController:
+    """Coordinación de roles y generación de la trama serial."""
 
-    rx, ry = robot['pos']
-    target_x = w // 3 + 15 if own_goal[0] == 0 else 2 * w // 3 - 15
-    target_y = int(np.clip(ball[1] if ball is not None else h // 2,
-                           h // 5, 4 * h // 5))
+    @staticmethod
+    def strategy_cobertura_delantero(robot, ball, own_goal, opp_goal, w, h,
+                               obstaculos, frame_w, frame_h,
+                               radio_colision, fuerza_max, borde_seguridad, fuerza_borde):
+        """Cubre el tercio propio mientras la pelota está lejos del delantero."""
+        if robot is None:
+            return "0,0", None
 
-    dist_al_tgt = np.hypot(target_x - rx, target_y - ry)
-    target_x, target_y = aplicar_repulsion(
-        (rx, ry), (target_x, target_y), obstaculos,
-        radio_colision, fuerza_max, dist_al_tgt)
-    target_x, target_y = aplicar_repulsion_bordes(
-        target_x, target_y, rx, ry, frame_w, frame_h, borde_seguridad, fuerza_borde)
-    target = keep_out_goal_areas((target_x, target_y), own_goal, opp_goal, w, h)
-    return drive_to_point_stable(robot, target, stop_distance=28)
+        rx, ry = robot['pos']
+        target_x = w // 3 + 15 if own_goal[0] == 0 else 2 * w // 3 - 15
+        target_y = int(np.clip(ball[1] if ball is not None else h // 2,
+                               h // 5, 4 * h // 5))
+
+        dist_al_tgt = np.hypot(target_x - rx, target_y - ry)
+        target_x, target_y = aplicar_repulsion(
+            (rx, ry), (target_x, target_y), obstaculos,
+            radio_colision, fuerza_max, dist_al_tgt)
+        target_x, target_y = aplicar_repulsion_bordes(
+            target_x, target_y, rx, ry, frame_w, frame_h, borde_seguridad, fuerza_borde)
+        target = keep_out_goal_areas((target_x, target_y), own_goal, opp_goal, w, h)
+        return drive_to_point_stable(robot, target, stop_distance=28)
+
+
+    @staticmethod
+    def strategy_delantero_polivalente(robot, ball, own_goal, opp_goal, w, h,
+                                  obstaculos, predictors, frame_w, frame_h,
+                                  radio_colision, fuerza_max, borde_seguridad,
+                                  fuerza_borde, distancia_detras_pelota):
+        """Un único DEL cubre en defensa y recupera/ataca cuando puede disputar la pelota."""
+        if robot is None or ball is None:
+            ROBOT_STATE[robot_DEL] = 'ESPERA'
+            return '0,0', None
+
+        bx, _ = ball
+        rx, ry = robot['pos']
+        distancia = np.hypot(bx - rx, ball[1] - ry)
+        tercio_propio = bx < w / 3 if own_goal[0] == 0 else bx > 2 * w / 3
+        mitad_propia = bx < w / 2 if own_goal[0] == 0 else bx > w / 2
+
+        # La cobertura solo se mantiene mientras la pelota está lejos: cuando se
+        # acerca, DEL sale a recuperarla sin esperar a otro robot de campo.
+        if tercio_propio and distancia > 220:
+            ROBOT_STATE[robot_DEL] = 'COBERTURA'
+            return strategy_cobertura_delantero(
+                robot, ball, own_goal, opp_goal, w, h, obstaculos, frame_w, frame_h,
+                radio_colision, fuerza_max, borde_seguridad, fuerza_borde)
+
+        modo = 'PRESION' if mitad_propia else 'ATAQUE'
+        if ROBOT_STATE.get(robot_DEL) != modo and hasattr(strategy_delantero, '_st'):
+            strategy_delantero._st = {'integral': 0.0, 'prev_error': 0.0}
+        ROBOT_STATE[robot_DEL] = modo
+        return strategy_delantero(
+            robot, ball, own_goal, opp_goal, w, h, obstaculos, predictors[robot_DEL],
+            frame_w, frame_h, radio_colision, fuerza_max, borde_seguridad, fuerza_borde,
+            distancia_detras_pelota)
+
+
+    @staticmethod
+    def calcular_logica(own_robots, ball_pos, opp_goal, own_goal, w, h,
+                        obstaculos, predictors, frame_w, frame_h, rep_config):
+        """
+        Controla POR y DEL; conserva el canal central en cero para el maestro actual.
+        """
+        comandos     = {role: '0,0' for role in ACTIVE_ROLES}
+        debug_targets= {}
+
+        robot_por = own_robots.get(robot_POR)
+        if robot_por:
+            cmd, tgt = strategy_portero(robot_por, ball_pos, own_goal, opp_goal, w, h)
+            comandos[robot_POR] = cmd
+            if tgt is not None:
+                debug_targets[robot_POR] = tgt
+
+        cmd_del, target_del = strategy_delantero_polivalente(
+            own_robots.get(robot_DEL), ball_pos, own_goal, opp_goal, w, h,
+            obstaculos, predictors, frame_w, frame_h,
+            rep_config['RADIO_COLISION'],
+            rep_config['FUERZA_REPULSION_MAX'],
+            rep_config['BORDE_DIST_SEGURIDAD'],
+            rep_config['FUERZA_REPULSION_BORDE'],
+            rep_config['DISTANCIA_DETRAS_PELOTA']
+        )
+        comandos[robot_DEL] = cmd_del
+        if target_del is not None:
+            debug_targets[robot_DEL] = target_del
+
+        # Robots no detectados: giro suave de búsqueda
+        if ball_pos is not None:
+            for role in ACTIVE_ROLES:
+                if own_robots.get(role) is None:
+                    comandos[role] = search_pwm(role)
+                    if role == robot_DEL:
+                        ROBOT_STATE[robot_DEL] = 'BUSQUEDA'
+
+        # Calibración per-robot
+        for role in ACTIVE_ROLES:
+            comandos[role] = apply_robot_calibration(comandos[role], role)
+
+        # El firmware espera POR|MED|DEL: el antiguo MED siempre recibe parada.
+        trama = f"<{comandos[robot_POR]}|0,0|{comandos[robot_DEL]}>\n"
+        return trama, debug_targets
+
+
+# Alias públicos para conservar compatibilidad con el código existente.
+strategy_cobertura_delantero = GameController.strategy_cobertura_delantero
+strategy_delantero_polivalente = GameController.strategy_delantero_polivalente
+calcular_logica = GameController.calcular_logica
 
 # ----------------------------------------------------------
 # DELANTERO – RECUPERACIÓN / ÓRBITA / APROXIMACIÓN / DISPARO
 # ----------------------------------------------------------
-def strategy_delantero(robot, ball, own_goal, opp_goal, w, h,
-                       obstaculos, predictor_del, frame_w, frame_h,
-                       radio_colision, fuerza_max, borde_seguridad, fuerza_borde,
-                       distancia_detras_pelota):
-    """
-    RECUPERACIÓN : gira lentamente para reaparecer ante la cámara.
-    ÓRBITA       : sortea la pelota si bloquea el camino al punto de ataque.
-    APROXIMACIÓN : se dirige al punto detrás de la pelota.
-    DISPARO      : empuja la pelota hacia la portería rival.
-    """
-    if robot is None or ball is None:
-        return "0,0", None
+class AttackerStrategy:
+    """Estrategia con memoria PID propia; invocable como la función original."""
 
-    if predictor_del.is_recovery():
-        direccion = 1 if (time.time() * 2) % 2 < 1 else -1
-        return compute_pwm(direccion * 20, 0), None
+    def __call__(self, robot, ball, own_goal, opp_goal, w, h,
+                           obstaculos, predictor_del, frame_w, frame_h,
+                           radio_colision, fuerza_max, borde_seguridad, fuerza_borde,
+                           distancia_detras_pelota):
+        """
+        RECUPERACIÓN : gira lentamente para reaparecer ante la cámara.
+        ÓRBITA       : sortea la pelota si bloquea el camino al punto de ataque.
+        APROXIMACIÓN : se dirige al punto detrás de la pelota.
+        DISPARO      : empuja la pelota hacia la portería rival.
+        """
+        if robot is None or ball is None:
+            return "0,0", None
 
-    rx, ry = robot['pos']
-    bx, by = ball
-    ox, oy = opp_goal
-    dx     = bx - ox;  dy = by - oy
-    mag    = np.hypot(dx, dy) + 1e-8
-    dist_atk = max(35, distancia_detras_pelota)
-    atk_x = bx + (dx / mag) * dist_atk
-    atk_y = by + (dy / mag) * dist_atk
-    dist_al_atk = np.hypot(atk_x - rx, atk_y - ry)
+        if predictor_del.is_recovery():
+            direccion = 1 if (time.time() * 2) % 2 < 1 else -1
+            return compute_pwm(direccion * 20, 0), None
 
-    # ── Detección de trayectoria bloqueada (ÓRBITA) ───────────
-    CLEARANCE_ORBIT = 36
-    lvx = atk_x - rx;  lvy = atk_y - ry
-    ll  = np.hypot(lvx, lvy) + 1e-8
-    cross  = abs(lvx * (ry - by) - lvy * (rx - bx)) / ll
-    t_proj = ((bx - rx) * lvx + (by - ry) * lvy) / (ll ** 2)
-    path_blocked = (cross < CLEARANCE_ORBIT) and (0.05 < t_proj < 0.95)
+        rx, ry = robot['pos']
+        bx, by = ball
+        ox, oy = opp_goal
+        dx     = bx - ox;  dy = by - oy
+        mag    = np.hypot(dx, dy) + 1e-8
+        dist_atk = max(35, distancia_detras_pelota)
+        atk_x = bx + (dx / mag) * dist_atk
+        atk_y = by + (dy / mag) * dist_atk
+        dist_al_atk = np.hypot(atk_x - rx, atk_y - ry)
 
-    if path_blocked and dist_al_atk > 25:
-        lnx = lvy / ll;  lny = -lvx / ll
-        side = 1 if (rx - bx) * lnx + (ry - by) * lny >= 0 else -1
-        target_x = int(np.clip(bx + lnx * side * (CLEARANCE_ORBIT + 8),
-                               borde_seguridad, frame_w - borde_seguridad))
-        target_y = int(np.clip(by + lny * side * (CLEARANCE_ORBIT + 8),
-                               borde_seguridad, frame_h - borde_seguridad))
-    elif dist_al_atk < 22:
-        target_x, target_y = int(bx), int(by)
-    else:
-        target_x, target_y = int(atk_x), int(atk_y)
+        # ── Detección de trayectoria bloqueada (ÓRBITA) ───────────
+        CLEARANCE_ORBIT = 36
+        lvx = atk_x - rx;  lvy = atk_y - ry
+        ll  = np.hypot(lvx, lvy) + 1e-8
+        cross  = abs(lvx * (ry - by) - lvy * (rx - bx)) / ll
+        t_proj = ((bx - rx) * lvx + (by - ry) * lvy) / (ll ** 2)
+        path_blocked = (cross < CLEARANCE_ORBIT) and (0.05 < t_proj < 0.95)
 
-    # Impide que el delantero entre al área propia.
-    target_x, target_y = keep_out_goal_areas(
-        (target_x, target_y), own_goal, opp_goal, w, h)
+        if path_blocked and dist_al_atk > 25:
+            lnx = lvy / ll;  lny = -lvx / ll
+            side = 1 if (rx - bx) * lnx + (ry - by) * lny >= 0 else -1
+            target_x = int(np.clip(bx + lnx * side * (CLEARANCE_ORBIT + 8),
+                                   borde_seguridad, frame_w - borde_seguridad))
+            target_y = int(np.clip(by + lny * side * (CLEARANCE_ORBIT + 8),
+                                   borde_seguridad, frame_h - borde_seguridad))
+        elif dist_al_atk < 22:
+            target_x, target_y = int(bx), int(by)
+        else:
+            target_x, target_y = int(atk_x), int(atk_y)
 
-    dist_al_target = np.hypot(target_x - rx, target_y - ry)
-    target_x, target_y = aplicar_repulsion(
-        (rx, ry), (target_x, target_y), obstaculos,
-        radio_colision, fuerza_max, dist_al_target)
-    target_x, target_y = aplicar_repulsion_bordes(
-        target_x, target_y, rx, ry, frame_w, frame_h, borde_seguridad, fuerza_borde)
+        # Impide que el delantero entre al área propia.
+        target_x, target_y = keep_out_goal_areas(
+            (target_x, target_y), own_goal, opp_goal, w, h)
 
-    target_x, target_y = keep_out_goal_areas(
-        (target_x, target_y), own_goal, opp_goal, w, h)
-    dist_al_target = np.hypot(target_x - rx, target_y - ry)
-    ang = robot['angle']
-    ang_to_tgt = (np.degrees(np.arctan2(target_y - ry, target_x - rx)) + 360) % 360
-    error_ang  = ((ang_to_tgt - ang + 180) % 360) - 180
+        dist_al_target = np.hypot(target_x - rx, target_y - ry)
+        target_x, target_y = aplicar_repulsion(
+            (rx, ry), (target_x, target_y), obstaculos,
+            radio_colision, fuerza_max, dist_al_target)
+        target_x, target_y = aplicar_repulsion_bordes(
+            target_x, target_y, rx, ry, frame_w, frame_h, borde_seguridad, fuerza_borde)
 
-    if not hasattr(strategy_delantero, '_st'):
-        strategy_delantero._st = {'integral': 0.0, 'prev_error': 0.0}
-    st = strategy_delantero._st
-    turn_pid, st['integral'], st['prev_error'] = \
-        control_pid_angular(error_ang, DT, st['integral'], st['prev_error'])
+        target_x, target_y = keep_out_goal_areas(
+            (target_x, target_y), own_goal, opp_goal, w, h)
+        dist_al_target = np.hypot(target_x - rx, target_y - ry)
+        ang = robot['angle']
+        ang_to_tgt = (np.degrees(np.arctan2(target_y - ry, target_x - rx)) + 360) % 360
+        error_ang  = ((ang_to_tgt - ang + 180) % 360) - 180
 
-    turn = int(np.clip(turn_pid, -90, 90))
-    return compute_pwm(turn, 1 if dist_al_target > 15 else 0), (int(target_x), int(target_y))
+        if not hasattr(self, '_st'):
+            self._st = {'integral': 0.0, 'prev_error': 0.0}
+        st = self._st
+        turn_pid, st['integral'], st['prev_error'] = \
+            control_pid_angular(error_ang, DT, st['integral'], st['prev_error'])
+
+        turn = int(np.clip(turn_pid, -90, 90))
+        return compute_pwm(turn, 1 if dist_al_target > 15 else 0), (int(target_x), int(target_y))
+
+
+strategy_delantero = AttackerStrategy()
 
 # ============================================================
 # DELANTERO POLIVALENTE: COBERTURA / PRESIÓN / ATAQUE
 # ============================================================
-def strategy_delantero_polivalente(robot, ball, own_goal, opp_goal, w, h,
-                              obstaculos, predictors, frame_w, frame_h,
-                              radio_colision, fuerza_max, borde_seguridad,
-                              fuerza_borde, distancia_detras_pelota):
-    """Un único DEL cubre en defensa y recupera/ataca cuando puede disputar la pelota."""
-    if robot is None or ball is None:
-        ROBOT_STATE[robot_DEL] = 'ESPERA'
-        return '0,0', None
 
-    bx, _ = ball
-    rx, ry = robot['pos']
-    distancia = np.hypot(bx - rx, ball[1] - ry)
-    tercio_propio = bx < w / 3 if own_goal[0] == 0 else bx > 2 * w / 3
-    mitad_propia = bx < w / 2 if own_goal[0] == 0 else bx > w / 2
-
-    # La cobertura solo se mantiene mientras la pelota está lejos: cuando se
-    # acerca, DEL sale a recuperarla sin esperar a otro robot de campo.
-    if tercio_propio and distancia > 220:
-        ROBOT_STATE[robot_DEL] = 'COBERTURA'
-        return strategy_cobertura_delantero(
-            robot, ball, own_goal, opp_goal, w, h, obstaculos, frame_w, frame_h,
-            radio_colision, fuerza_max, borde_seguridad, fuerza_borde)
-
-    modo = 'PRESION' if mitad_propia else 'ATAQUE'
-    if ROBOT_STATE.get(robot_DEL) != modo and hasattr(strategy_delantero, '_st'):
-        strategy_delantero._st = {'integral': 0.0, 'prev_error': 0.0}
-    ROBOT_STATE[robot_DEL] = modo
-    return strategy_delantero(
-        robot, ball, own_goal, opp_goal, w, h, obstaculos, predictors[robot_DEL],
-        frame_w, frame_h, radio_colision, fuerza_max, borde_seguridad, fuerza_borde,
-        distancia_detras_pelota)
-
-# ============================================================
-# LÓGICA PRINCIPAL DE JUEGO
-# ============================================================
-def calcular_logica(own_robots, ball_pos, opp_goal, own_goal, w, h,
-                    obstaculos, predictors, frame_w, frame_h, rep_config):
-    """
-    Controla POR y DEL; conserva el canal central en cero para el maestro actual.
-    """
-    comandos     = {role: '0,0' for role in ACTIVE_ROLES}
-    debug_targets= {}
-
-    robot_por = own_robots.get(robot_POR)
-    if robot_por:
-        cmd, tgt = strategy_portero(robot_por, ball_pos, own_goal, opp_goal, w, h)
-        comandos[robot_POR] = cmd
-        if tgt is not None:
-            debug_targets[robot_POR] = tgt
-
-    cmd_del, target_del = strategy_delantero_polivalente(
-        own_robots.get(robot_DEL), ball_pos, own_goal, opp_goal, w, h,
-        obstaculos, predictors, frame_w, frame_h,
-        rep_config['RADIO_COLISION'],
-        rep_config['FUERZA_REPULSION_MAX'],
-        rep_config['BORDE_DIST_SEGURIDAD'],
-        rep_config['FUERZA_REPULSION_BORDE'],
-        rep_config['DISTANCIA_DETRAS_PELOTA']
-    )
-    comandos[robot_DEL] = cmd_del
-    if target_del is not None:
-        debug_targets[robot_DEL] = target_del
-
-    # Robots no detectados: giro suave de búsqueda
-    if ball_pos is not None:
-        for role in ACTIVE_ROLES:
-            if own_robots.get(role) is None:
-                comandos[role] = search_pwm(role)
-                if role == robot_DEL:
-                    ROBOT_STATE[robot_DEL] = 'BUSQUEDA'
-
-    # Calibración per-robot
-    for role in ACTIVE_ROLES:
-        comandos[role] = apply_robot_calibration(comandos[role], role)
-
-    # El firmware espera POR|MED|DEL: el antiguo MED siempre recibe parada.
-    trama = f"<{comandos[robot_POR]}|0,0|{comandos[robot_DEL]}>\n"
-    return trama, debug_targets
 
 # ============================================================
 # VENTANA DE CALIBRACIÓN (Lab polar con trackbars)
